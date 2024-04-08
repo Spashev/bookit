@@ -1,0 +1,117 @@
+version: "3.0"
+
+services:
+  database:
+    image: postgres:16.0-alpine
+    restart: unless-stopped
+    volumes:
+      - ./volumes/postgre:/var/lib/postgresql-core/data/
+    env_file:
+      - ./docker/.env
+    ports:
+      - "5430:5432"
+
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    restart: unless-stopped
+    ports:
+      - "6432:6432"
+    environment:
+      DB_HOST: database
+      DB_USER: bookituser
+      DB_PASSWORD: 'sn2b&ibdp92'
+      DB_NAME: bookit
+      AUTH_TYPE: md5
+      CLIENT_TLS_SSLMODE: allow
+      CLIENT_TLS_KEY_FILE: /etc/pgbouncer/pgbouncer.key
+      CLIENT_TLS_CERT_FILE: /etc/pgbouncer/pgbouncer.crt
+      SERVER_TLS_SSLMODE: verify-full
+      SERVER_TLS_CA_FILE: /etc/pgbouncer/server-ca.pem
+    volumes:
+      - ./docker/pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini
+      - ./docker/pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt
+      - ./volumes/pgbouncer/log/pgbouncer:/var/log/pgbouncer
+    depends_on:
+      - database
+
+  rabbit:
+    image: rabbitmq:management-alpine
+    restart: unless-stopped
+    ports:
+      - "15670:15672"
+      - "5670:5672"
+
+  redis:
+    restart: unless-stopped
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+
+  minio:
+    image: minio/minio
+    volumes:
+      - ./volumes/minio:/minio_files
+      - ./docker/minio/config:/root/.minio
+    env_file:
+      - docker/.env
+    healthcheck:
+      test: [ "CMD", "mc", "ready", "local" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    command: 'minio server /minio_files --console-address ":9001"'
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+
+  createbuckets:
+    image: minio/mc
+    depends_on:
+      - minio
+    env_file:
+      - ./docker/.env
+    entrypoint: /bin/sh -c "
+      /usr/bin/mc config host add minio http://minio:9000 minioadmin minioadmin;
+      /usr/bin/mc mb --quiet minio/bookit;
+      /usr/bin/mc anonymous set public minio/bookit;"
+
+  app:
+    build:
+      context: .
+      dockerfile: ./docker/Dockerfile
+    tty: true
+    image: super-app
+    restart: unless-stopped
+#    command: "gunicorn core.asgi:application --worker-class uvicorn.workers.UvicornWorker --workers 3 --bind 0.0.0.0:8000 --reload"
+#    command: "gunicorn core.wsgi:application --bind 0.0.0.0:8000 --workers 3 --timeout 200 --reload"
+    command: "python manage.py runserver 0.0.0.0:8000"
+    env_file:
+      - ./docker/.env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/code:rw
+      - ./volumes/static:/static:rw
+    depends_on:
+      - redis
+      - pgbouncer
+      - rabbit
+      - minio
+    extra_hosts:
+      - "localhost:172.17.0.1"
+
+  worker:
+    build:
+      context: .
+      dockerfile: ./docker/Dockerfile
+    entrypoint: celery
+    command: -A core worker -c 3 --loglevel=INFO
+    env_file:
+      - ./docker/.env
+    volumes:
+      - ./app:/code
+    depends_on:
+      - redis
+      - pgbouncer
+      - rabbit
+      - minio

@@ -1,0 +1,86 @@
+version: "3.0"
+
+services:
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    restart: unless-stopped
+    ports:
+      - "6432:6432"
+    environment:
+      DB_HOST: localhost
+      DB_USER: postgres
+      DB_PASSWORD: lenger1992
+      DB_NAME: bookitdb
+      AUTH_TYPE: md5
+      CLIENT_TLS_SSLMODE: allow
+      CLIENT_TLS_KEY_FILE: /etc/pgbouncer/pgbouncer.key
+      CLIENT_TLS_CERT_FILE: /etc/pgbouncer/pgbouncer.crt
+      SERVER_TLS_SSLMODE: verify-full
+      SERVER_TLS_CA_FILE: /etc/pgbouncer/server-ca.pem
+    networks:
+      - bookit_network
+    volumes:
+      - ./docker/pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini
+      - ./docker/pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt
+      - ./volumes/pgbouncer/log/pgbouncer:/var/log/pgbouncer
+
+  rabbit:
+    image: rabbitmq:management-alpine
+    restart: unless-stopped
+    ports:
+      - "15670:15672"
+      - "5670:5672"
+    networks:
+      - bookit_network
+
+  redis:
+    restart: unless-stopped
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    networks:
+      - bookit_network
+
+  app:
+    build:
+      context: .
+      dockerfile: ./docker/Dockerfile
+    tty: true
+    image: super-app
+    restart: unless-stopped
+    command: "gunicorn core.asgi:application --worker-class uvicorn.workers.UvicornWorker --workers 3 --bind 0.0.0.0:8000 --reload"
+#    command: "gunicorn core.wsgi:application --bind 0.0.0.0:8000 --workers 3 --timeout 200 --reload"
+    env_file:
+      - ./docker/.env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/code:rw
+      - ./volumes/static:/static:rw
+    networks:
+      - bookit_network
+    depends_on:
+      - redis
+      - pgbouncer
+      - rabbit
+
+  worker:
+    build:
+      context: .
+      dockerfile: ./docker/Dockerfile
+    entrypoint: celery
+    command: -A core worker -c 3 --loglevel=INFO
+    env_file:
+      - ./docker/.env
+    volumes:
+      - ./app:/code
+    networks:
+      - bookit_network
+    depends_on:
+      - redis
+      - pgbouncer
+      - rabbit
+
+networks:
+  bookit_network:
+    driver: bridge
